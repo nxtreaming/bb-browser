@@ -413,7 +413,7 @@ async function siteRun(
       ? `Please log in to https://${site.domain} in your browser first, then retry.`
       : undefined;
     const hint = loginHint || errObj.hint;
-    const reportHint = `If this is an adapter bug, report it: gh issue create --repo epiral/bb-sites --title "[${name}] <description>"`;
+    const reportHint = `If this is an adapter bug, report via: gh issue create --repo epiral/bb-sites --title "[${name}] <description>" OR: bb-browser site github/issue-create epiral/bb-sites --title "[${name}] <description>"`;
 
     if (options.json) {
       console.log(JSON.stringify({ id: evalReq.id, success: false, error: errObj.error, hint, reportHint }));
@@ -421,6 +421,7 @@ async function siteRun(
       console.error(`[error] site ${name}: ${errObj.error}`);
       if (hint) console.error(`  Hint: ${hint}`);
       console.error(`  Report: gh issue create --repo epiral/bb-sites --title "[${name}] ..."`);
+      console.error(`     or: bb-browser site github/issue-create epiral/bb-sites --title "[${name}] ..."`);
     }
     process.exit(1);
   }
