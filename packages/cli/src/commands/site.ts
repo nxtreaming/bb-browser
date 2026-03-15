@@ -702,4 +702,20 @@ export async function siteCommand(
       }
       break;
   }
+
+  // 静默后台更新社区 adapter
+  silentUpdate();
+}
+
+function silentUpdate(): void {
+  const gitDir = join(COMMUNITY_SITES_DIR, ".git");
+  if (!existsSync(gitDir)) return;
+  import("node:child_process").then(({ spawn }) => {
+    const child = spawn("git", ["pull", "--ff-only"], {
+      cwd: COMMUNITY_SITES_DIR,
+      stdio: "ignore",
+      detached: true,
+    });
+    child.unref();
+  }).catch(() => {});
 }
