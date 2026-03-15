@@ -69,7 +69,7 @@ bb-browser site reddit/hot --openclaw
 bb-browser site xueqiu/hot-stock 5 --openclaw --jq '.items[] | {name, changePercent}'
 ```
 
-ClawHub Skill: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser-openclaw)
+ClawHub Skill: [bb-browser-openclaw](https://clawhub.ai/yan5xu/bb-browser)
 
 ### Chrome 扩展（独立模式）
 
