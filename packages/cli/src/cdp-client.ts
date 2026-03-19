@@ -633,17 +633,40 @@ async function insertTextIntoNode(targetId: string, backendNodeId: number, text:
   await sessionCommand(targetId, "Input.insertText", { text });
 }
 
-async function getNodeBox(targetId: string, backendNodeId: number): Promise<{ x: number; y: number }> {
-  const result = await sessionCommand<{ model: { content: number[]; border: number[] } }>(targetId, "DOM.getBoxModel", {
-    backendNodeId,
+async function getInteractablePoint(targetId: string, backendNodeId: number): Promise<{ x: number; y: number }> {
+  const resolved = await sessionCommand<{ object: { objectId: string } }>(targetId, "DOM.resolveNode", { backendNodeId });
+  const call = await sessionCommand<{
+    result: { value?: { x?: number; y?: number } };
+    exceptionDetails?: { text?: string };
+  }>(targetId, "Runtime.callFunctionOn", {
+    objectId: resolved.object.objectId,
+    functionDeclaration: `function() {
+      if (!(this instanceof Element)) {
+        throw new Error('Ref does not resolve to an element');
+      }
+      this.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'center' });
+      const rect = this.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        throw new Error('Element is not visible');
+      }
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    }`,
+    returnByValue: true,
   });
-  const quad = result.model.content.length >= 8 ? result.model.content : result.model.border;
-  const xs = [quad[0], quad[2], quad[4], quad[6]];
-  const ys = [quad[1], quad[3], quad[5], quad[7]];
-  return {
-    x: xs.reduce((a, b) => a + b, 0) / xs.length,
-    y: ys.reduce((a, b) => a + b, 0) / ys.length,
-  };
+
+  if (call.exceptionDetails) {
+    throw new Error(call.exceptionDetails.text || "Failed to resolve element point");
+  }
+
+  const point = call.result.value;
+  if (!point || typeof point.x !== "number" || typeof point.y !== "number" || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+    throw new Error("Failed to resolve element point");
+  }
+
+  return point as { x: number; y: number };
 }
 
 async function mouseClick(targetId: string, x: number, y: number): Promise<void> {
@@ -897,7 +920,7 @@ async function dispatchRequest(request: Request): Promise<Response> {
     case "hover": {
       if (!request.ref) return fail(request.id, "Missing ref parameter");
       const backendNodeId = await parseRef(request.ref);
-      const point = await getNodeBox(target.id, backendNodeId);
+      const point = await getInteractablePoint(target.id, backendNodeId);
       await sessionCommand(target.id, "Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y, button: "none" });
       if (request.action === "click") await mouseClick(target.id, point.x, point.y);
       return ok(request.id, {});
