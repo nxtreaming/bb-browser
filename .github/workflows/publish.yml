@@ -1,8 +1,17 @@
 name: Publish
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      tag_name:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag (e.g. bb-browser-v0.10.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -35,10 +44,10 @@ jobs:
       - name: Package extension
         run: |
           cd extension
-          zip -r "../bb-browser-extension-${{ github.event.release.tag_name }}.zip" .
+          zip -r "../bb-browser-extension-${{ inputs.tag_name }}.zip" .
 
       - name: Upload extension asset
-        run: gh release upload "${{ github.event.release.tag_name }}" "bb-browser-extension-${{ github.event.release.tag_name }}.zip" --clobber
+        run: gh release upload "${{ inputs.tag_name }}" "bb-browser-extension-${{ inputs.tag_name }}.zip" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
