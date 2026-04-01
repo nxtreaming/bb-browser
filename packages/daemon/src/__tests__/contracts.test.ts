@@ -7,6 +7,9 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { TabStateManager, type TabState } from "../tab-state.js";
 
 // ---------------------------------------------------------------------------
@@ -694,5 +697,73 @@ describe("TabStateManager + TabState contract tests", () => {
         assert.ok(allSeqs[i] > allSeqs[i - 1]);
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// daemon.json PID strategy tests
+// ---------------------------------------------------------------------------
+
+/**
+ * Mirrors the isProcessAlive helper from @bb-browser/cli daemon-manager.
+ * Uses signal 0 which doesn't actually send a signal — just checks existence.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("daemon.json PID strategy", () => {
+  const testDir = path.join(os.tmpdir(), "bb-browser-test-" + process.pid);
+  const testDaemonJson = path.join(testDir, "daemon.json");
+
+  beforeEach(() => {
+    mkdirSync(testDir, { recursive: true });
+    if (existsSync(testDaemonJson)) {
+      unlinkSync(testDaemonJson);
+    }
+  });
+
+  it("stale daemon.json with dead PID is detected", () => {
+    // Write a daemon.json with a PID that doesn't exist (e.g., 999999)
+    const stalePid = 999999;
+    const info = { pid: stalePid, host: "127.0.0.1", port: 19824, token: "stale-token" };
+    writeFileSync(testDaemonJson, JSON.stringify(info));
+
+    // Read it back and verify the PID liveness check detects it as dead
+    const raw = JSON.parse(
+      readFileSync(testDaemonJson, "utf8"),
+    );
+    assert.equal(raw.pid, stalePid);
+    assert.equal(isProcessAlive(raw.pid), false, "Dead PID should be detected as not alive");
+  });
+
+  it("daemon.json with alive PID is accepted", () => {
+    // Write daemon.json with process.pid (current process, definitely alive)
+    const info = { pid: process.pid, host: "127.0.0.1", port: 19824, token: "alive-token" };
+    writeFileSync(testDaemonJson, JSON.stringify(info));
+
+    const raw = JSON.parse(
+      readFileSync(testDaemonJson, "utf8"),
+    );
+    assert.equal(raw.pid, process.pid);
+    assert.equal(isProcessAlive(raw.pid), true, "Current process PID should be detected as alive");
+  });
+
+  it("daemon.json contains all required fields", () => {
+    const info = { pid: 12345, host: "127.0.0.1", port: 19824, token: "test-token-abc" };
+    writeFileSync(testDaemonJson, JSON.stringify(info));
+
+    const raw = JSON.parse(
+      readFileSync(testDaemonJson, "utf8"),
+    );
+    assert.equal(typeof raw.pid, "number");
+    assert.equal(typeof raw.host, "string");
+    assert.equal(typeof raw.port, "number");
+    assert.equal(typeof raw.token, "string");
   });
 });

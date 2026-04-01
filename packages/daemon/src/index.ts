@@ -24,9 +24,8 @@ import { TabStateManager } from "./tab-state.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-const PID_FILE_PATH = "/tmp/bb-browser.pid";
 const DAEMON_DIR = path.join(os.homedir(), ".bb-browser");
-const TOKEN_FILE = path.join(DAEMON_DIR, "daemon.token");
+const DAEMON_JSON = path.join(DAEMON_DIR, "daemon.json");
 const DEFAULT_CDP_PORT = 19825;
 
 // ---------------------------------------------------------------------------
@@ -114,32 +113,27 @@ Endpoints:
 }
 
 // ---------------------------------------------------------------------------
-// PID / token file management
+// daemon.json management
 // ---------------------------------------------------------------------------
 
-function writePidFile(): void {
-  writeFileSync(PID_FILE_PATH, String(process.pid), "utf-8");
+interface DaemonInfo {
+  pid: number;
+  host: string;
+  port: number;
+  token: string;
 }
 
-function cleanupPidFile(): void {
-  if (existsSync(PID_FILE_PATH)) {
-    try {
-      unlinkSync(PID_FILE_PATH);
-    } catch {}
-  }
-}
-
-function writeTokenFile(token: string): void {
+function writeDaemonJson(info: DaemonInfo): void {
   try {
     mkdirSync(DAEMON_DIR, { recursive: true });
-    writeFileSync(TOKEN_FILE, token, { mode: 0o600 });
+    writeFileSync(DAEMON_JSON, JSON.stringify(info), { mode: 0o600 });
   } catch {}
 }
 
-function cleanupTokenFile(): void {
-  if (existsSync(TOKEN_FILE)) {
+function cleanupDaemonJson(): void {
+  if (existsSync(DAEMON_JSON)) {
     try {
-      unlinkSync(TOKEN_FILE);
+      unlinkSync(DAEMON_JSON);
     } catch {}
   }
 }
@@ -224,8 +218,7 @@ async function main(): Promise<void> {
     console.error("[Daemon] Shutting down...");
     cdp.disconnect();
     await httpServer.stop();
-    cleanupPidFile();
-    cleanupTokenFile();
+    cleanupDaemonJson();
     process.exit(0);
   };
 
@@ -242,8 +235,12 @@ async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   await httpServer.start();
-  writePidFile();
-  writeTokenFile(options.token);
+  writeDaemonJson({
+    pid: process.pid,
+    host: options.host,
+    port: options.port,
+    token: options.token,
+  });
 
   console.error(
     `[Daemon] HTTP server listening on http://${options.host}:${options.port}`,
@@ -271,7 +268,6 @@ async function main(): Promise<void> {
 
 main().catch((error) => {
   console.error("[Daemon] Fatal error:", error);
-  cleanupPidFile();
-  cleanupTokenFile();
+  cleanupDaemonJson();
   process.exit(1);
 });

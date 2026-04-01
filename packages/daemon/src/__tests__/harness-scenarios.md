@@ -156,6 +156,23 @@ Agent 的反馈即 harness 改进方向。常见改进信号：
 - 增量查询返回错误的条目数 → 需要检查 seq/cursor 逻辑
 - Agent 无法理解 snapshot 输出 → 需要优化可访问性树格式
 
+## 场景 7: 冷启动 + PID 残留恢复
+
+验证 daemon 被异常终止后 CLI 能自动恢复。
+
+**步骤：**
+1. 启动 daemon，确认 `~/.bb-browser/daemon.json` 存在
+2. `kill -9 <daemon-pid>` 强制杀进程
+3. 确认 `daemon.json` 残留（未被正常清理）
+4. 运行 `bb-browser eval "1+1"` — CLI 应检测到 PID 不存活，删除旧文件，重新 spawn daemon
+5. 验证命令正常返回结果
+
+**验证点：**
+- daemon.json 包含 pid, host, port, token
+- PID 不存活时自动清理并重启
+- 新 daemon 写入新的 daemon.json
+- 不依赖硬编码地址，使用 daemon.json 中的 host:port
+
 ## 自动化执行建议
 
 可以用 protocol-drift.test.ts 作为基线，在 CI 中（有 Chrome headless 时）自动验证。

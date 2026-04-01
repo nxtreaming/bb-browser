@@ -3,7 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -11,21 +11,45 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Request, Response } from "@bb-browser/shared";
-import { DAEMON_PORT, COMMAND_TIMEOUT } from "@bb-browser/shared";
+import { COMMAND_TIMEOUT } from "@bb-browser/shared";
 
 // ---------------------------------------------------------------------------
-// Paths
+// Paths & types
 // ---------------------------------------------------------------------------
 
 const DAEMON_DIR = path.join(os.homedir(), ".bb-browser");
-const TOKEN_FILE = path.join(DAEMON_DIR, "daemon.token");
+const DAEMON_JSON = path.join(DAEMON_DIR, "daemon.json");
+
+interface DaemonInfo {
+  pid: number;
+  host: string;
+  port: number;
+  token: string;
+}
 
 // ---------------------------------------------------------------------------
 // Cached state
 // ---------------------------------------------------------------------------
 
-let cachedToken: string | null = null;
+let cachedInfo: DaemonInfo | null = null;
 let daemonReady = false;
+
+// ---------------------------------------------------------------------------
+// PID liveness check
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a process with the given PID is alive.
+ * Uses signal 0 which doesn't actually send a signal — it just checks existence.
+ */
+export function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Low-level HTTP helpers
@@ -34,7 +58,7 @@ let daemonReady = false;
 function httpJson<T>(
   method: "GET" | "POST",
   urlPath: string,
-  token: string,
+  info: { host: string; port: number; token: string },
   body?: unknown,
   timeout = 5000,
 ): Promise<T> {
@@ -42,12 +66,12 @@ function httpJson<T>(
     const payload = body !== undefined ? JSON.stringify(body) : undefined;
     const req = httpRequest(
       {
-        hostname: "127.0.0.1",
-        port: DAEMON_PORT,
+        hostname: info.host,
+        port: info.port,
         path: urlPath,
         method,
         headers: {
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${info.token}`,
           ...(payload
             ? {
                 "Content-Type": "application/json",
@@ -85,15 +109,31 @@ function httpJson<T>(
 }
 
 // ---------------------------------------------------------------------------
-// Token
+// daemon.json
 // ---------------------------------------------------------------------------
 
-async function readToken(): Promise<string | null> {
+async function readDaemonJson(): Promise<DaemonInfo | null> {
   try {
-    return (await readFile(TOKEN_FILE, "utf8")).trim();
+    const raw = await readFile(DAEMON_JSON, "utf8");
+    const info = JSON.parse(raw) as DaemonInfo;
+    if (
+      typeof info.pid === "number" &&
+      typeof info.host === "string" &&
+      typeof info.port === "number" &&
+      typeof info.token === "string"
+    ) {
+      return info;
+    }
+    return null;
   } catch {
     return null;
   }
+}
+
+async function deleteDaemonJson(): Promise<void> {
+  try {
+    await unlink(DAEMON_JSON);
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -112,34 +152,42 @@ export function getDaemonPath(): string {
 
 /**
  * Ensure the daemon is running and ready to accept commands.
- * - Reads token from ~/.bb-browser/daemon.token
+ * - Reads ~/.bb-browser/daemon.json for pid, host, port, token
+ * - Checks if pid is alive via signal 0
+ * - If pid dead, deletes stale daemon.json and spawns new daemon
  * - Checks health via GET /status
  * - If not running, spawns daemon process (detached) and waits for health
  */
 export async function ensureDaemon(): Promise<void> {
-  if (daemonReady && cachedToken) {
+  if (daemonReady && cachedInfo) {
     // Quick re-check: is it still alive?
     try {
-      await httpJson<{ running: boolean }>("GET", "/status", cachedToken, undefined, 2000);
+      await httpJson<{ running: boolean }>("GET", "/status", cachedInfo, undefined, 2000);
       return;
     } catch {
       daemonReady = false;
-      cachedToken = null;
+      cachedInfo = null;
     }
   }
 
-  // Try reading existing token and checking if daemon is alive
-  let token = await readToken();
-  if (token) {
-    try {
-      const status = await httpJson<{ running?: boolean }>("GET", "/status", token, undefined, 2000);
-      if (status.running) {
-        cachedToken = token;
-        daemonReady = true;
-        return;
+  // Try reading existing daemon.json and checking if daemon is alive
+  let info = await readDaemonJson();
+  if (info) {
+    // PID liveness check — detect stale daemon.json from crashed daemon
+    if (!isProcessAlive(info.pid)) {
+      await deleteDaemonJson();
+      info = null;
+    } else {
+      try {
+        const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
+        if (status.running) {
+          cachedInfo = info;
+          daemonReady = true;
+          return;
+        }
+      } catch {
+        // Daemon process exists but HTTP not responding — fall through to spawn
       }
-    } catch {
-      // Daemon not running — fall through to spawn
     }
   }
 
@@ -155,13 +203,13 @@ export async function ensureDaemon(): Promise<void> {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 200));
-    // Re-read token each iteration (daemon writes it on startup)
-    token = await readToken();
-    if (!token) continue;
+    // Re-read daemon.json each iteration (daemon writes it on startup)
+    info = await readDaemonJson();
+    if (!info) continue;
     try {
-      const status = await httpJson<{ running?: boolean }>("GET", "/status", token, undefined, 2000);
+      const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
       if (status.running) {
-        cachedToken = token;
+        cachedInfo = info;
         daemonReady = true;
         return;
       }
@@ -179,25 +227,25 @@ export async function ensureDaemon(): Promise<void> {
  * Send a command to the daemon via POST /command.
  */
 export async function daemonCommand(request: Request): Promise<Response> {
-  if (!cachedToken) {
-    cachedToken = await readToken();
+  if (!cachedInfo) {
+    cachedInfo = await readDaemonJson();
   }
-  if (!cachedToken) {
-    throw new Error("No daemon token found. Is the daemon running?");
+  if (!cachedInfo) {
+    throw new Error("No daemon.json found. Is the daemon running?");
   }
-  return httpJson<Response>("POST", "/command", cachedToken, request, COMMAND_TIMEOUT);
+  return httpJson<Response>("POST", "/command", cachedInfo, request, COMMAND_TIMEOUT);
 }
 
 /**
  * Stop the daemon via POST /shutdown.
  */
 export async function stopDaemon(): Promise<boolean> {
-  const token = cachedToken ?? (await readToken());
-  if (!token) return false;
+  const info = cachedInfo ?? (await readDaemonJson());
+  if (!info) return false;
   try {
-    await httpJson("POST", "/shutdown", token);
+    await httpJson("POST", "/shutdown", info);
     daemonReady = false;
-    cachedToken = null;
+    cachedInfo = null;
     return true;
   } catch {
     return false;
@@ -208,10 +256,10 @@ export async function stopDaemon(): Promise<boolean> {
  * Check if daemon is running by querying GET /status.
  */
 export async function isDaemonRunning(): Promise<boolean> {
-  const token = cachedToken ?? (await readToken());
-  if (!token) return false;
+  const info = cachedInfo ?? (await readDaemonJson());
+  if (!info) return false;
   try {
-    const status = await httpJson<{ running?: boolean }>("GET", "/status", token, undefined, 2000);
+    const status = await httpJson<{ running?: boolean }>("GET", "/status", info, undefined, 2000);
     return status.running === true;
   } catch {
     return false;
@@ -222,10 +270,10 @@ export async function isDaemonRunning(): Promise<boolean> {
  * Get full daemon status (for the status command).
  */
 export async function getDaemonStatus(): Promise<Record<string, unknown> | null> {
-  const token = cachedToken ?? (await readToken());
-  if (!token) return null;
+  const info = cachedInfo ?? (await readDaemonJson());
+  if (!info) return null;
   try {
-    return await httpJson<Record<string, unknown>>("GET", "/status", token, undefined, 2000);
+    return await httpJson<Record<string, unknown>>("GET", "/status", info, undefined, 2000);
   } catch {
     return null;
   }
